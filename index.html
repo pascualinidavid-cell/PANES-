@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0d9488" />
+  <meta name="description" content="Sistema de registro de asistencia para comedor" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Comedor" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect fill='%230d9488' width='192' height='192'/><text x='50%' y='50%' font-size='100' fill='white' text-anchor='middle' dominant-baseline='central' font-family='system-ui'>C</text></svg>" />
+  <link rel="manifest" href="data:application/json,{%22name%22:%22Comedor%20Asistencia%22,%22short_name%22:%22Comedor%22,%22description%22:%22Registro de asistencia%22,%22start_url%22:%22/%22,%22scope%22:%22/%22,%22display%22:%22standalone%22,%22orientation%22:%22portrait%22,%22theme_color%22:%22%230d9488%22,%22background_color%22:%22%23f1f5f9%22,%22icons%22:[{%22src%22:%22data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect fill='%230d9488' width='192' height='192'/><text x='50%' y='50%' font-size='100' fill='white' text-anchor='middle' dominant-baseline='central' font-family='system-ui'>C</text></svg>%22,%22sizes%22:%22192x192%22,%22type%22:%22image/svg+xml%22,%22purpose%22:%22any%22}]}" />
+  <title>Comedor · Asistencia</title>
+  <script crossorigin src="https://unpkg.com/react@19/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@19/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    html, body { 
+      margin: 0; 
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f1f5f9;
+      overflow: hidden;
+    }
+    #root {
+      position: fixed;
+      inset: 0;
+      overflow-y: auto;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    input, textarea, select {
+      -webkit-user-select: text;
+      user-select: text;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // Service Worker Registration
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        const swCode = `
+const CACHE_NAME = "comedor-v1";
+const urlsToCache = ["/"];
+
+self.addEventListener("install", (event) => {
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(urlsToCache)));
+});
+
+self.addEventListener("fetch", (event) => {
+  event.respondWith(
+    caches.match(event.request).then((response) => response || fetch(event.request))
+  );
+});
+`;
+        const blob = new Blob([swCode], { type: "application/javascript" });
+        const swUrl = URL.createObjectURL(blob);
+        navigator.serviceWorker.register(swUrl).catch(() => {});
+      });
+    }
+
+    // Storage
+    const storage = {
+      async get(key) {
+        try {
+          const val = localStorage.getItem(key);
+          return val ? { key, value: val } : null;
+        } catch { return null; }
+      },
+      async set(key, value) {
+        try {
+          localStorage.setItem(key, value);
+          return { key, value };
+        } catch { return null; }
+      },
+      async list(prefix) {
+        try {
+          const keys = [];
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k.startsWith(prefix)) keys.push(k);
+          }
+          return { keys, prefix };
+        } catch { return { keys: [] }; }
+      },
+    };
+
+    // Helpers
+    const pad2 = (n) => String(n).padStart(2, "0");
+    const getDateKey = (d = new Date()) =>
+      `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    const getTimeStr = (d = new Date()) =>
+      `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+
+    function parseScan(raw) {
+      const txt = (raw || "").trim();
+      if (txt.includes("@")) {
+        const parts = txt.split("@");
+        if (parts.length >= 5) {
+          const apellido = (parts[1] || "").trim();
+          const nombrePila = (parts[2] || "").trim();
+          const sexoRaw = (parts[3] || "").trim().toUpperCase();
+          const dniDigits = (parts[4] || "").replace(/\D/g, "");
+          const fnacRaw = (parts[6] || "").trim();
+          const nombreCompleto = [nombrePila, apellido].filter(Boolean).join(" ").trim();
+          const sexo = sexoRaw === "M" || sexoRaw === "F" ? sexoRaw : null;
+          const fechaNacimiento = /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(fnacRaw) ? fnacRaw : null;
+          if (dniDigits.length >= 6) {
+            return { dni: dniDigits, nombre: nombreCompleto || null, sexo, fechaNacimiento };
+          }
+        }
+      }
+      const digits = txt.replace(/\D/g, "");
+      if (digits.length >= 6) return { dni: digits, nombre: null, sexo: null, fechaNacimiento: null };
+      return { dni: txt, nombre: null, sexo: null, fechaNacimiento: null };
+    }
+
+    function calcularEdad(fechaStr) {
+      const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(fechaStr || "");
+      if (!m) return null;
+      const dia = Number(m[1]);
+      const mes = Number(m[2]);
+      const anio = Number(m[3]);
+      const nacimiento = new Date(anio, mes - 1, dia);
+      if (Number.isNaN(nacimiento.getTime())) return null;
+      const hoy = new Date();
+      let edad = hoy.getFullYear() - nacimiento.getFullYear();
+      const aniversario = new Date(hoy.getFullYear(), nacimiento.getMonth(), nacimiento.getDate());
+      if (hoy < aniversario) edad -= 1;
+      return edad >= 0 && edad < 130 ? edad : null;
+    }
+
+    function getEdad(persona) {
+      if (!persona) return null;
+      if (persona.edadManual != null) return Number(persona.edadManual);
+      if (persona.fechaNacimiento) return calcularEdad(persona.fechaNacimiento);
+      return null;
+    }
+
+    const AGE_BRACKETS = [
+      { label: "<20", min: 0, max: 19 },
+      { label: "20-29", min: 20, max: 29 },
+      { label: "30-39", min: 30, max: 39 },
+      { label: "40-49", min: 40, max: 49 },
+      { label: "50-59", min: 50, max: 59 },
+      { label: "60-69", min: 60, max: 69 },
+      { label: "70-79", min: 70, max: 79 },
+      { label: "80-89", min: 80, max: 89 },
+      { label: "90-99", min: 90, max: 99 },
+      { label: "100+", min: 100, max: 999 },
+    ];
+
+    function computeStats(list, padron) {
+      const byDni = new Map(padron.map((p) => [p.dni, p]));
+      const brackets = AGE_BRACKETS.map((b) => ({ ...b, count: 0 }));
+      let sinEdad = 0;
+      let mujeres = 0;
+      let varones = 0;
+      let sinSexo = 0;
+      list.forEach((item) => {
+        const persona = byDni.get(item.dni) || item;
+        const edad = getEdad(persona);
+        if (edad == null) {
+          sinEdad += 1;
+        } else {
+          const bucket = brackets.find((b) => edad >= b.min && edad <= b.max);
+          if (bucket) bucket.count += 1;
+          else sinEdad += 1;
+        }
+        if (persona.sexo === "F") mujeres += 1;
+        else if (persona.sexo === "M") varones += 1;
+        else sinSexo += 1;
+      });
+      return { brackets, sinEdad, mujeres, varones, sinSexo, total: list.length };
+    }
+
+    export default function App() {
+      const todayKey = useState(() => getDateKey())[0];
+      const [tab, setTab] = useState("scan");
+      const [padron, setPadron] = useState([]);
+      const [todayList, setTodayList] = useState([]);
+      const [toast, setToast] = useState("");
+      const [manualInput, setManualInput] = useState("");
+      const [lastResult, setLastResult] = useState(null);
+      const [editingDni, setEditingDni] = useState(null);
+      const [editingName, setEditingName] = useState("");
+      const [search, setSearch] = useState("");
+      const [showAddPersona, setShowAddPersona] = useState(false);
+      const [newDni, setNewDni] = useState("");
+      const [newNombre, setNewNombre] = useState("");
+      const [newEdad, setNewEdad] = useState("");
+      const [newSexo, setNewSexo] = useState("");
+      const [showImport, setShowImport] = useState(false);
+      const [importText, setImportText] = useState("");
+      const [kpiScope, setKpiScope] = useState("hoy");
+
+      const inputRef = useRef(null);
+      const padronRef = useRef([]);
+      const todayListRef = useRef([]);
+
+      const showToast = (msg) => {
+        setToast(msg);
+        setTimeout(() => setToast(""), 3500);
+      };
+
+      useEffect(() => {
+        (async () => {
+          try {
+            const res = await storage.get("padron");
+            setPadron(res ? JSON.parse(res.value) : []);
+          } catch { setPadron([]); }
+        })();
+        (async () => {
+          try {
+            const res = await storage.get(`asistencias:${todayKey}`);
+            setTodayList(res ? JSON.parse(res.value) : []);
+          } catch { setTodayList([]); }
+        })();
+      }, []);
+
+      useEffect(() => { padronRef.current = padron; }, [padron]);
+      useEffect(() => { todayListRef.current = todayList; }, [todayList]);
+
+      const writePadron = useCallback(async (next) => {
+        padronRef.current = next;
+        setPadron(next);
+        try { await storage.set("padron", JSON.stringify(next)); }
+        catch { showToast("No se pudo guardar."); }
+      }, []);
+
+      const writeToday = useCallback(async (next) => {
+        todayListRef.current = next;
+        setTodayList(next);
+        try { await storage.set(`asistencias:${todayKey}`, JSON.stringify(next)); }
+        catch { showToast("No se pudo guardar."); }
+      }, [todayKey]);
+
+      const registerAttendance = useCallback(
+        async (rawDni, scanInfo = {}) => {
+          const { nombre: nombreFromScan, sexo: sexoFromScan, fechaNacimiento: fnacFromScan } = scanInfo;
+          const dni = String(rawDni || "").trim();
+          if (!dni) return;
+          const currentPadron = padronRef.current;
+          const existing = currentPadron.find((p) => p.dni === dni);
+          const working = existing
+            ? { ...existing }
+            : { dni, nombre: "Sin nombre", sexo: null, fechaNacimiento: null, edadManual: null };
+          let changed = !existing;
+          if ((!working.nombre || working.nombre === "Sin nombre") && nombreFromScan) {
+            working.nombre = nombreFromScan;
+            changed = true;
+          }
+          if (!working.sexo && sexoFromScan) {
+            working.sexo = sexoFromScan;
+            changed = true;
+          }
+          if (!working.fechaNacimiento && fnacFromScan) {
+            working.fechaNacimiento = fnacFromScan;
+            changed = true;
+          }
+          if (changed) {
+            const nextPadron = existing
+              ? currentPadron.map((p) => (p.dni === dni ? working : p))
+              : [...currentPadron, working];
+            await writePadron(nextPadron);
+          }
+          const nombre = working.nombre || "Sin nombre";
+          const currentToday = todayListRef.current;
+          const already = currentToday.find((e) => e.dni === dni);
+          if (already) {
+            setLastResult({ type: "duplicate", dni, nombre, horaAnterior: already.hora });
+            return;
+          }
+          const entry = { dni, nombre, hora: getTimeStr() };
+          await writeToday([...currentToday, entry]);
+          setLastResult({ type: "success", dni, nombre, hora: entry.hora });
+        },
+        [writePadron, writeToday]
+      );
+
+      const confirmDuplicate = async () => {
+        if (!lastResult || lastResult.type !== "duplicate") return;
+        const { dni, nombre } = lastResult;
+        const entry = { dni, nombre, hora: getTimeStr() };
+        await writeToday([...todayListRef.current, entry]);
+        setLastResult({ type: "success", dni, nombre, hora: entry.hora });
+      };
+
+      const onManualKeyDown = (e) => {
+        if (e.key === "Enter" && manualInput.trim()) {
+          const parsed = parseScan(manualInput);
+          registerAttendance(parsed.dni, parsed);
+          setManualInput("");
+        }
+      };
+
+      const startEdit = (dni) => {
+        const p = padronRef.current.find((x) => x.dni === dni) || {};
+        setEditingDni(dni);
+        setEditingName(p.nombre && p.nombre !== "Sin nombre" ? p.nombre : "");
+      };
+
+      const saveEdit = async () => {
+        const name = editingName.trim() || "Sin nombre";
+        const nextPadron = padronRef.current.map((p) =>
+          p.dni === editingDni ? { ...p, nombre: name } : p
+        );
+        const nextToday = todayListRef.current.map((e) => (e.dni === editingDni ? { ...e, nombre: name } : e));
+        await writePadron(nextPadron);
+        await writeToday(nextToday);
+        setEditingDni(null);
+        setEditingName("");
+      };
+
+      const addPersonaManual = async () => {
+        const dni = newDni.replace(/\D/g, "");
+        if (!dni || !newNombre.trim()) return;
+        if (padron.some((p) => p.dni === dni)) {
+          showToast("Ese DNI ya está en la lista.");
+          return;
+        }
+        const edadManual = newEdad.trim() && !Number.isNaN(Number(newEdad)) ? Number(newEdad) : null;
+        const nextPadron = [
+          ...padronRef.current,
+          { dni, nombre: newNombre.trim(), edadManual, sexo: newSexo || null, fechaNacimiento: null },
+        ];
+        await writePadron(nextPadron);
+        setNewDni("");
+        setNewNombre("");
+        setNewEdad("");
+        setNewSexo("");
+        setShowAddPersona(false);
+      };
+
+      const importList = async () => {
+        const lines = importText.split("\n").map((l) => l.trim()).filter(Boolean);
+        const byDni = new Map(padronRef.current.map((p) => [p.dni, p]));
+        let added = 0;
+        let updated = 0;
+        for (const line of lines) {
+          const parts = line.split(/[,;\t]/).map((s) => s.trim());
+          const dni = (parts[0] || "").replace(/\D/g, "");
+          const nombre = (parts[1] || "").trim();
+          const edadRaw = (parts[2] || "").trim();
+          const edadManual = edadRaw && !Number.isNaN(Number(edadRaw)) ? Number(edadRaw) : null;
+          const sexo = parts[3] ? (parts[3].toLowerCase().includes("f") ? "F" : "M") : null;
+          if (!dni) continue;
+          const existing = byDni.get(dni);
+          if (!existing) {
+            byDni.set(dni, { dni, nombre: nombre || "Sin nombre", edadManual, sexo });
+            added++;
+          } else {
+            const upd = { ...existing };
+            let ch = false;
+            if ((!upd.nombre || upd.nombre === "Sin nombre") && nombre) {
+              upd.nombre = nombre;
+              ch = true;
+            }
+            if (upd.edadManual == null && edadManual != null) {
+              upd.edadManual = edadManual;
+              ch = true;
+            }
+            if (!upd.sexo && sexo) {
+              upd.sexo = sexo;
+              ch = true;
+            }
+            if (ch) {
+              byDni.set(dni, upd);
+              updated++;
+            }
+          }
+        }
+        const nextPadron = Array.from(byDni.values());
+        await writePadron(nextPadron);
+        showToast(`Importado: ${added} nuevos, ${updated} actualizados.`);
+        setImportText("");
+        setShowImport(false);
+      };
+
+      const filteredPadron = padron.filter((p) => {
+        const s = search.trim().toLowerCase();
+        if (!s) return true;
+        return p.dni.includes(s) || (p.nombre || "").toLowerCase().includes(s);
+      });
+
+      const sortedToday = [...todayList].sort((a, b) => (a.hora < b.hora ? 1 : -1));
+      const stats = kpiScope === "padron" ? computeStats(padron, padron) : computeStats(todayList, padron);
+
+      return (
+        <div className="min-h-screen bg-emerald-50 text-stone-900 flex flex-col fixed inset-0">
+          <header className="bg-white border-b border-emerald-100 px-4 py-3 flex-shrink-0">
+            <h1 className="text-lg font-bold text-stone-900">🍽️ Comedor</h1>
+          </header>
+
+          <main className="flex-1 px-4 py-4 max-w-md w-full mx-auto overflow-y-auto pb-20">
+            {tab === "scan" && (
+              <div className="space-y-4">
+                <div className="bg-white rounded-2xl p-5 text-center shadow-sm border border-emerald-100">
+                  <p className="text-sm text-stone-400 font-semibold">Personas hoy</p>
+                  <p className="font-mono text-5xl font-bold text-teal-700">{todayList.length}</p>
+                </div>
+
+                <div className="bg-white rounded-xl p-3 border border-emerald-100">
+                  <input
+                    ref={inputRef}
+                    type="text"
+                    value={manualInput}
+                    onChange={(e) => setManualInput(e.target.value)}
+                    onKeyDown={onManualKeyDown}
+                    placeholder="Escanea o escribe DNI"
+                    className="w-full text-lg px-3 py-2 rounded-lg border border-stone-200 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    autoFocus
+                  />
+                </div>
+
+                {lastResult && (
+                  <div className={`p-4 rounded-xl ${lastResult.type === "duplicate" ? "bg-rose-50 border border-rose-200" : "bg-teal-50 border border-teal-200"}`}>
+                    <p className="font-bold">{lastResult.nombre}</p>
+                    <p className="text-sm text-stone-600">DNI {lastResult.dni}</p>
+                    {lastResult.type === "duplicate" ? (
+                      <button
+                        onClick={confirmDuplicate}
+                        className="mt-2 text-sm text-teal-700 font-medium underline"
+                      >
+                        Registrar de nuevo
+                      </button>
+                    ) : (
+                      <p className="text-sm text-stone-600 mt-1">✓ {lastResult.hora}</p>
+                    )}
+                  </div>
+                )}
+
+                <div>
+                  <p className="text-xs font-semibold text-stone-500 mb-2">Registrados</p>
+                  {sortedToday.length === 0 ? (
+                    <p className="text-sm text-stone-400">Nadie aún.</p>
+                  ) : (
+                    <div className="space-y-1.5 max-h-96 overflow-y-auto">
+                      {sortedToday.map((e, i) => (
+                        <div
+                          key={`${e.dni}-${i}`}
+                          className="flex items-center justify-between bg-white rounded-lg px-3 py-2 border border-emerald-100"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium truncate">{e.nombre}</p>
+                            <p className="text-xs text-stone-400">DNI {e.dni}</p>
+                          </div>
+                          <span className="text-xs text-stone-400 font-mono ml-2">{e.hora}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {tab === "padron" && (
+              <div className="space-y-3">
+                <div className="bg-white rounded-xl p-3 border border-emerald-100 flex items-center justify-between">
+                  <div>
+                    <p className="text-sm text-stone-400 font-semibold">Padrón</p>
+                    <p className="text-2xl font-bold font-mono text-teal-700">{padron.length}</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setShowAddPersona(!showAddPersona)}
+                      className="bg-amber-400 text-stone-900 rounded-lg px-3 py-2 text-sm font-medium"
+                    >
+                      ➕
+                    </button>
+                    <button
+                      onClick={() => setShowImport(!showImport)}
+                      className="bg-stone-100 text-stone-700 rounded-lg px-3 py-2 text-sm font-medium"
+                    >
+                      📥
+                    </button>
+                  </div>
+                </div>
+
+                {showAddPersona && (
+                  <div className="bg-white rounded-xl p-3 border border-emerald-100 space-y-2">
+                    <input
+                      value={newDni}
+                      onChange={(e) => setNewDni(e.target.value)}
+                      placeholder="DNI"
+                      className="w-full text-sm px-3 py-2 rounded-lg border border-stone-200 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    />
+                    <input
+                      value={newNombre}
+                      onChange={(e) => setNewNombre(e.target.value)}
+                      placeholder="Nombre"
+                      className="w-full text-sm px-3 py-2 rounded-lg border border-stone-200 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    />
+                    <div className="flex gap-2">
+                      <input
+                        value={newEdad}
+                        onChange={(e) => setNewEdad(e.target.value.replace(/\D/g, ""))}
+                        placeholder="Edad"
+                        inputMode="numeric"
+                        className="w-20 text-sm px-3 py-2 rounded-lg border border-stone-200 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                      />
+                      <select
+                        value={newSexo}
+                        onChange={(e) => setNewSexo(e.target.value)}
+                        className="flex-1 text-sm px-3 py-2 rounded-lg border border-stone-200 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                      >
+                        <option value="">Sexo</option>
+                        <option value="F">Mujer</option>
+                        <option value="M">Varón</option>
+                      </select>
+                    </div>
+                    <button
+                      onClick={addPersonaManual}
+                      className="w-full bg-teal-600 text-white rounded-lg py-2 text-sm font-medium"
+                    >
+                      Guardar
+                    </button>
+                  </div>
+                )}
+
+                {showImport && (
+                  <div className="bg-white rounded-xl p-3 border border-emerald-100 space-y-2">
+                    <textarea
+                      value={importText}
+                      onChange={(e) => setImportText(e.target.value)}
+                      placeholder="DNI, Nombre, Edad, Sexo"
+                      rows={4}
+                      className="w-full text-sm px-3 py-2 rounded-lg border border-stone-200 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    />
+                    <button
+                      onClick={importList}
+                      className="w-full bg-teal-600 text-white rounded-lg py-2 text-sm font-medium"
+                    >
+                      Importar
+                    </button>
+                  </div>
+                )}
+
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Buscar..."
+                  className="w-full text-sm px-3 py-2 rounded-lg border border-stone-200 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                />
+
+                <div className="space-y-1.5 max-h-96 overflow-y-auto">
+                  {filteredPadron.length === 0 ? (
+                    <p className="text-sm text-stone-400">Sin resultados.</p>
+                  ) : (
+                    filteredPadron.map((p) => (
+                      <div
+                        key={p.dni}
+                        className="flex items-center justify-between bg-white rounded-lg px-3 py-2 border border-emerald-100"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">{p.nombre || "Sin nombre"}</p>
+                          <p className="text-xs text-stone-400">
+                            DNI {p.dni} · {getEdad(p) ? `${getEdad(p)}a` : "?a"} · {p.sexo === "F" ? "👩" : p.sexo === "M" ? "👨" : "?"}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => startEdit(p.dni)}
+                          className="text-stone-400 text-lg ml-2"
+                        >
+                          ✏️
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+
+            {tab === "kpis" && (
+              <div className="space-y-3">
+                <div className="bg-white rounded-xl p-3 border border-emerald-100 flex gap-2">
+                  <button
+                    onClick={() => setKpiScope("hoy")}
+                    className={`flex-1 text-sm font-medium py-2 rounded-lg ${
+                      kpiScope === "hoy" ? "bg-teal-600 text-white" : "bg-stone-50"
+                    }`}
+                  >
+                    Hoy
+                  </button>
+                  <button
+                    onClick={() => setKpiScope("padron")}
+                    className={`flex-1 text-sm font-medium py-2 rounded-lg ${
+                      kpiScope === "padron" ? "bg-teal-600 text-white" : "bg-stone-50"
+                    }`}
+                  >
+                    Padrón
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="bg-white rounded-xl p-3 border border-emerald-100 text-center">
+                    <p className="text-xs text-stone-400 font-semibold">👩 Mujeres</p>
+                    <p className="text-3xl font-bold text-rose-600">{stats.mujeres}</p>
+                    <p className="text-xs text-stone-400">{stats.total > 0 ? Math.round((stats.mujeres / stats.total) * 100) : 0}%</p>
+                  </div>
+                  <div className="bg-white rounded-xl p-3 border border-emerald-100 text-center">
+                    <p className="text-xs text-stone-400 font-semibold">👨 Varones</p>
+                    <p className="text-3xl font-bold text-teal-700">{stats.varones}</p>
+                    <p className="text-xs text-stone-400">{stats.total > 0 ? Math.round((stats.varones / stats.total) * 100) : 0}%</p>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-xl p-3 border border-emerald-100">
+                  <p className="text-xs font-semibold text-stone-500 mb-3">Por edad</p>
+                  <div className="space-y-2 max-h-80 overflow-y-auto">
+                    {stats.brackets.map((b) => (
+                      <div key={b.label} className="flex items-center gap-2">
+                        <div className="w-10 text-xs font-medium text-right">{b.label}</div>
+                        <div className="flex-1 h-5 bg-emerald-100 rounded overflow-hidden">
+                          <div
+                            className="h-full bg-teal-600 transition-all"
+                            style={{
+                              width: stats.total > 0 ? `${Math.max(3, (b.count / Math.max(1, Math.max(...stats.brackets.map(x => x.count)))) * 100)}%` : "0%",
+                            }}
+                          />
+                        </div>
+                        <div className="w-6 text-xs text-right font-medium">{b.count}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {stats.sinEdad > 0 && <p className="text-xs text-stone-400 mt-2">+{stats.sinEdad} sin edad</p>}
+                </div>
+              </div>
+            )}
+          </main>
+
+          {toast && (
+            <div className="fixed bottom-16 left-1/2 -translate-x-1/2 bg-stone-900 text-white text-sm px-4 py-2 rounded-full z-50 shadow-lg">
+              {toast}
+            </div>
+          )}
+
+          <nav className="fixed bottom-0 inset-x-0 bg-white border-t border-emerald-100 flex justify-around py-2 z-20">
+            <button
+              onClick={() => setTab("scan")}
+              className={`flex-1 text-center py-2 text-xs font-medium ${
+                tab === "scan" ? "text-teal-700 bg-teal-50" : "text-stone-400"
+              }`}
+            >
+              📱
+            </button>
+            <button
+              onClick={() => setTab("padron")}
+              className={`flex-1 text-center py-2 text-xs font-medium ${
+                tab === "padron" ? "text-teal-700 bg-teal-50" : "text-stone-400"
+              }`}
+            >
+              👥
+            </button>
+            <button
+              onClick={() => setTab("kpis")}
+              className={`flex-1 text-center py-2 text-xs font-medium ${
+                tab === "kpis" ? "text-teal-700 bg-teal-50" : "text-stone-400"
+              }`}
+            >
+              📊
+            </button>
+          </nav>
+        </div>
+      );
+    }
+
+    const root = document.getElementById("root");
+    if (root) {
+      ReactDOM.createRoot(root).render(<App />);
+    }
+  </script>
+</body>
+</html>
